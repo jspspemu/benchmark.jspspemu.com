@@ -1,7 +1,7 @@
 # jspspemu-benchmarks
 
 For your browser:
-* http://jspspemu.github.io/jspspemu-benchmarks/v1/benchmark.html
+* http://benchmark.jspspemu.com/v1/
 
 For node.js:
 * https://github.com/jspspemu/jspspemu-benchmarks/blob/gh-pages/v1/benchmark
