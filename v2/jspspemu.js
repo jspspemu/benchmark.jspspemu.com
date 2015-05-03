@@ -5230,7 +5230,7 @@ var ANodeStmStaticJump = (function (_super) {
     }
     ANodeStmStaticJump.prototype.toJs = function () {
         switch (this.type) {
-            case 'normal': return "if (" + this.cond.toJs() + ") { loop_state = " + this.address + "; continue loop; }";
+            case 'normal': return "if (" + this.cond.toJs() + ") { loop_state = " + addressToHex(this.address) + "; continue loop; }";
             case 'while': return "if (" + this.cond.toJs() + ") { continue loop_" + addressToHex(this.address) + "; } else { break loop_" + addressToHex(this.address) + "; } }";
         }
     };
@@ -5263,8 +5263,9 @@ var ANodeStmList = (function (_super) {
 exports.ANodeStmList = ANodeStmList;
 var ANodeFunction = (function (_super) {
     __extends(ANodeFunction, _super);
-    function ANodeFunction(childs) {
+    function ANodeFunction(address, childs) {
         _super.call(this, childs);
+        this.address = address;
     }
     ANodeFunction.prototype.toJs = function () {
         var _this = this;
@@ -5286,6 +5287,7 @@ var ANodeFunction = (function (_super) {
                     labelsByAddress[child.address].references.push(child);
             }
         }
+        var debug = (this.address == 0x088042e4);
         var checkRangeHasJustInternalReferences = function (min, max) {
             for (var n = min; n <= max; n++) {
                 var child = _this.childs[n];
@@ -5295,19 +5297,41 @@ var ANodeFunction = (function (_super) {
                     }
                     for (var _i = 0, _a = child.references; _i < _a.length; _i++) {
                         var ref = _a[_i];
-                        if (ref.address < min || ref.address > max)
+                        if (ref.index < min || ref.index > max)
                             return false;
                     }
                 }
             }
             return true;
         };
+        var getInternalLabelCount = function (min, max) {
+            var count = 0;
+            for (var n = min; n <= max; n++) {
+                var child = _this.childs[n];
+                if (child instanceof ANodeStmLabel)
+                    count++;
+            }
+            return count;
+        };
         for (var _d = 0, _e = this.childs; _d < _e.length; _d++) {
             var child = _e[_d];
             if (child instanceof ANodeStmStaticJump) {
                 var label = labelsByAddress[child.address];
+                if (debug) {
+                    printf("Jump index:%d to label %08X", child.index, child.address);
+                    if (label) {
+                        printf("Lable index:%d, references %d", child.index, label.references.length);
+                    }
+                    else {
+                        printf("No label");
+                    }
+                }
                 if (label && label.index < child.index) {
-                    if (checkRangeHasJustInternalReferences(label.index, child.index) && label.references.length == 1) {
+                    var rangeInternalReferences = checkRangeHasJustInternalReferences(label.index, child.index);
+                    var labelCount = getInternalLabelCount(label.index, child.index);
+                    if (debug)
+                        printf("Internal references: %d", rangeInternalReferences);
+                    if (rangeInternalReferences && label.references.length == 1 && labelCount == 1) {
                         label.type = 'while';
                         child.type = 'while';
                     }
@@ -5554,7 +5578,7 @@ var AstBuilder = (function () {
     AstBuilder.prototype.u_imm32 = function (value) { return new ANodeExprU32(value); };
     AstBuilder.prototype.stm = function (expr) { return expr ? (new ANodeStmExpr(expr)) : new ANodeStm(); };
     AstBuilder.prototype.stms = function (stms) { return new ANodeStmList(stms); };
-    AstBuilder.prototype.func = function (stms) { return new ANodeFunction(stms); };
+    AstBuilder.prototype.func = function (address, stms) { return new ANodeFunction(address, stms); };
     AstBuilder.prototype.array = function (exprList) { return new ANodeExprArray(exprList); };
     AstBuilder.prototype.arrayNumbers = function (values) {
         var _this = this;
@@ -5579,7 +5603,7 @@ var MipsAstBuilder = (function (_super) {
         if (comment === void 0) { comment = '-'; }
         return new ANodeStmRaw("debugger; // " + comment + "\n");
     };
-    MipsAstBuilder.prototype.functionPrefix = function () { return this.stm(); };
+    MipsAstBuilder.prototype.functionPrefix = function () { return this.stm(this.raw('var BRANCHPC = 0, BRANCHFLAG = false;')); };
     MipsAstBuilder.prototype.gpr = function (index) {
         if (index === 0)
             return new ANodeExprLValueVar('0');
@@ -5607,8 +5631,8 @@ var MipsAstBuilder = (function (_super) {
         return new ANodeExprLValueSetGet('state.setVfrCc($0, #)', 'state.getVfrCc($0)', [this.imm32(index)]);
     };
     MipsAstBuilder.prototype.ra = function () { return new ANodeExprLValueVar('state.gpr[31]'); };
-    MipsAstBuilder.prototype.branchflag = function () { return new ANodeExprLValueVar('state.BRANCHFLAG'); };
-    MipsAstBuilder.prototype.branchpc = function () { return new ANodeExprLValueVar('state.BRANCHPC'); };
+    MipsAstBuilder.prototype.branchflag = function () { return new ANodeExprLValueVar('BRANCHFLAG'); };
+    MipsAstBuilder.prototype.branchpc = function () { return new ANodeExprLValueVar('BRANCHPC'); };
     MipsAstBuilder.prototype.assignGpr = function (index, expr) {
         if (index == 0)
             return this.stm();
@@ -6832,8 +6856,6 @@ var CpuState = (function () {
         this.vector_vs = [0, 0, 0, 0];
         this.vector_vt = [0, 0, 0, 0];
         this.vector_vd = [0, 0, 0, 0];
-        this.BRANCHFLAG = false;
-        this.BRANCHPC = 0;
         this.PC = 0;
         this.IC = 0;
         this.LO = 0;
@@ -7419,7 +7441,7 @@ var PspInstructionStm = (function (_super) {
         this.PC = di.PC;
     }
     PspInstructionStm.prototype.toJs = function () {
-        return "/*" + IntUtils.toHexString(this.PC, 8) + "*/ /* " + StringUtils.padLeft(this.di.type.name, ' ', 6) + " */  " + this.code.toJs();
+        return this.code.toJs() + " /* " + this.di.type.name + " */";
     };
     PspInstructionStm.prototype.optimize = function () { return new PspInstructionStm(this.di, this.code.optimize()); };
     return PspInstructionStm;
@@ -7441,7 +7463,7 @@ var InvalidatableCpuFunction = (function () {
     InvalidatableCpuFunction.prototype.execute = function (state) {
         if (this.func == null)
             this.func = this.generator(this.PC);
-        this.func.func(state, this.func.args);
+        this.func.func(state);
     };
     return InvalidatableCpuFunction;
 })();
@@ -7547,7 +7569,7 @@ var FunctionGenerator = (function () {
         var code = this.getFunctionCode(info);
         try {
             var startHex = addressToHex(info.start);
-            var func = (new Function("return function func_" + startHex + "(state, args) { \"use strict\"; " + code.code + " }")());
+            var func = (new Function('args', "return function func_" + startHex + "(state) { \"use strict\"; " + code.code + " }")(code.args));
             return new FunctionGeneratorResult(func, code, info, new CpuFunctionWithArgs(func, code.args));
         }
         catch (e) {
@@ -7610,7 +7632,7 @@ var FunctionGenerator = (function () {
         var args = {};
         if (info.start == CpuSpecialAddresses.EXIT_THREAD)
             return new FunctionCode("state.thread.stop('CpuSpecialAddresses.EXIT_THREAD'); throw new CpuBreakException();", args);
-        var func = ast.func([ast.functionPrefix()]);
+        var func = ast.func(info.start, [ast.functionPrefix()]);
         var labels = {};
         for (var labelPC in info.labels)
             labels[labelPC] = ast.label(labelPC);
@@ -7674,8 +7696,8 @@ var FunctionGenerator = (function () {
                     args[cacheaddrName] = -1;
                     func.add(ins);
                     func.add(delayedCode);
-                    func.add(ast.raw('if (state.BRANCHFLAG) {'));
-                    func.add(ast.raw("state.PC = state.BRANCHPC & " + Memory.MASK + ";"));
+                    func.add(ast.raw('if (BRANCHFLAG) {'));
+                    func.add(ast.raw("state.PC = BRANCHPC & " + Memory.MASK + ";"));
                     func.add(ast.raw("var expectedRA = state.RA;"));
                     func.add(ast.raw("if (args." + cacheaddrName + " != state.PC) args." + cachefuncName + " = state.getFunction(args." + cacheaddrName + " = state.PC);"));
                     func.add(ast.raw("args." + cachefuncName + ".execute(state);"));
@@ -7693,7 +7715,7 @@ var FunctionGenerator = (function () {
                     else {
                         func.add(ins);
                         func.add(delayedCode);
-                        func.add(ast.raw('state.jumpCall = state.getFunction(state.PC = state.BRANCHPC);'));
+                        func.add(ast.raw('state.jumpCall = state.getFunction(state.PC = BRANCHPC);'));
                         func.add(ast.raw('return;'));
                     }
                 }
@@ -7701,10 +7723,10 @@ var FunctionGenerator = (function () {
                     func.add(ins);
                     func.add(delayedCode);
                     if (type.isFixedAddressJump && labels[targetAddress]) {
-                        func.add(ast.sjump(ast.raw('state.BRANCHFLAG'), targetAddress));
+                        func.add(ast.sjump(ast.raw('BRANCHFLAG'), targetAddress));
                     }
                     else {
-                        func.add(ast.raw("if (state.BRANCHFLAG) {"));
+                        func.add(ast.raw("if (BRANCHFLAG) {"));
                         func.add(ast.raw("state.PC = " + targetAddressHex + ";"));
                         func.add(ast.raw('state.jumpCall = state.getFunction(state.PC);'));
                         func.add(ast.raw("return;"));
@@ -14616,154 +14638,27 @@ var __extends = this.__extends || function (d, b) {
     __.prototype = b.prototype;
     d.prototype = new __();
 };
-var FastMemoryBase = (function () {
-    function FastMemoryBase() {
-        this.buffer = new ArrayBuffer(0x0a000000 + 4);
-        this.s8 = new Int8Array(this.buffer);
-        this.u8 = new Uint8Array(this.buffer);
-        this.u16 = new Uint16Array(this.buffer);
-        this.s16 = new Int16Array(this.buffer);
-        this.s32 = new Int32Array(this.buffer);
-        this.u32 = new Uint32Array(this.buffer);
-        this.f32 = new Float32Array(this.buffer);
-    }
-    FastMemoryBase.prototype.writeInt8 = function (address, value) { this.u8[(address & FastMemory.MASK) >> 0] = value; };
-    FastMemoryBase.prototype.writeInt16 = function (address, value) { this.u16[(address & FastMemory.MASK) >> 1] = value; };
-    FastMemoryBase.prototype.writeInt32 = function (address, value) { this.u32[(address & FastMemory.MASK) >> 2] = value; };
-    FastMemoryBase.prototype.writeFloat32 = function (address, value) { this.f32[(address & FastMemory.MASK) >> 2] = value; };
-    FastMemoryBase.prototype.readInt8 = function (address) { return this.s8[(address & FastMemory.MASK) >> 0]; };
-    FastMemoryBase.prototype.readUInt8 = function (address) { return this.u8[(address & FastMemory.MASK) >> 0]; };
-    FastMemoryBase.prototype.readInt16 = function (address) { return this.s16[(address & FastMemory.MASK) >> 1]; };
-    FastMemoryBase.prototype.readUInt16 = function (address) { return this.u16[(address & FastMemory.MASK) >> 1]; };
-    FastMemoryBase.prototype.readInt32 = function (address) { return this.s32[(address & FastMemory.MASK) >> 2]; };
-    FastMemoryBase.prototype.readUInt32 = function (address) { return this.u32[(address & FastMemory.MASK) >> 2]; };
-    FastMemoryBase.prototype.readFloat32 = function (address) { return this.f32[(address & FastMemory.MASK) >> 2]; };
-    FastMemoryBase.prototype.readUInt32_2 = function (address) { return this.u32[address]; };
-    FastMemoryBase.prototype.slice = function (low, high) {
-        low &= FastMemory.MASK;
-        high &= FastMemory.MASK;
-        return new Uint8Array(this.buffer, low, high - low);
-    };
-    FastMemoryBase.prototype.availableAfterAddress = function (address) {
-        return this.buffer.byteLength - (address & FastMemory.MASK);
-    };
-    return FastMemoryBase;
-})();
-var LowMemorySegment = (function () {
-    function LowMemorySegment(name, offset, buffer) {
-        this.name = name;
-        this.offset = offset;
-        this.buffer = buffer;
-        this.size = buffer.byteLength;
-        this.low = offset;
-        this.offset4 = (offset / 4) | 0;
-        this.high = this.low + this.size;
-        this.s8 = new Int8Array(this.buffer);
-        this.u8 = new Uint8Array(this.buffer);
-        this.u16 = new Uint16Array(this.buffer);
-        this.s16 = new Int16Array(this.buffer);
-        this.s32 = new Int32Array(this.buffer);
-        this.u32 = new Uint32Array(this.buffer);
-        this.f32 = new Float32Array(this.buffer);
-    }
-    LowMemorySegment.prototype.contains = function (address) {
-        return address >= this.low && address < this.high;
-    };
-    LowMemorySegment.prototype.writeInt8 = function (address, value) { this.u8[(address & FastMemory.MASK - this.offset) >> 0] = value; };
-    LowMemorySegment.prototype.writeInt16 = function (address, value) { this.u16[(address & FastMemory.MASK - this.offset) >> 1] = value; };
-    LowMemorySegment.prototype.writeInt32 = function (address, value) { this.u32[(address & FastMemory.MASK - this.offset) >> 2] = value; };
-    LowMemorySegment.prototype.writeFloat32 = function (address, value) { this.f32[(address & FastMemory.MASK - this.offset) >> 2] = value; };
-    LowMemorySegment.prototype.readInt8 = function (address) { return this.s8[(address & FastMemory.MASK - this.offset) >> 0]; };
-    LowMemorySegment.prototype.readUInt8 = function (address) { return this.u8[(address & FastMemory.MASK - this.offset) >> 0]; };
-    LowMemorySegment.prototype.readInt16 = function (address) { return this.s16[(address & FastMemory.MASK - this.offset) >> 1]; };
-    LowMemorySegment.prototype.readUInt16 = function (address) { return this.u16[(address & FastMemory.MASK - this.offset) >> 1]; };
-    LowMemorySegment.prototype.readInt32 = function (address) { return this.s32[(address & FastMemory.MASK - this.offset) >> 2]; };
-    LowMemorySegment.prototype.readUInt32 = function (address) { return this.u32[(address & FastMemory.MASK - this.offset) >> 2]; };
-    LowMemorySegment.prototype.readFloat32 = function (address) { return this.f32[(address & FastMemory.MASK - this.offset) >> 2]; };
-    LowMemorySegment.prototype.readUInt32_2 = function (address) { return this.u32[address - this.offset4]; };
-    LowMemorySegment.prototype.slice = function (low, high) {
-        low &= FastMemory.MASK;
-        high &= FastMemory.MASK;
-        low -= this.offset;
-        high -= this.offset;
-        return new Uint8Array(this.buffer, low, high - low);
-    };
-    LowMemorySegment.prototype.availableAfterAddress = function (address) {
-        return this.buffer.byteLength - (address & FastMemory.MASK - this.offset);
-    };
-    return LowMemorySegment;
-})();
-var LowMemoryBase = (function () {
-    function LowMemoryBase() {
-        this.scratchpad = new LowMemorySegment('scatchpad', 0x00000000, new ArrayBuffer(16 * 1024 + 0x00010000));
-        this.videomem = new LowMemorySegment('videomem', 0x04000000, new ArrayBuffer(2 * 1024 * 1024));
-        this.mainmem = new LowMemorySegment('mainmem', 0x08000000, new ArrayBuffer(32 * 1024 * 1024));
-    }
-    LowMemoryBase.prototype.getMemRange = function (address) {
-        address &= FastMemory.MASK;
-        if (address >= 0x08000000) {
-            return this.mainmem;
-        }
-        else {
-            if (this.scratchpad.contains(address))
-                return this.scratchpad;
-            if (this.videomem.contains(address))
-                return this.videomem;
-            if (this.mainmem.contains(address))
-                return this.mainmem;
-            printf("Unmapped: %08X", address);
-            return null;
-        }
-    };
-    LowMemoryBase.prototype.writeInt8 = function (address, value) { this.getMemRange(address).writeInt8(address, value); };
-    LowMemoryBase.prototype.writeInt16 = function (address, value) { this.getMemRange(address).writeInt16(address, value); };
-    LowMemoryBase.prototype.writeInt32 = function (address, value) { this.getMemRange(address).writeInt32(address, value); };
-    LowMemoryBase.prototype.writeFloat32 = function (address, value) { this.getMemRange(address).writeFloat32(address, value); };
-    LowMemoryBase.prototype.readInt8 = function (address) { return this.getMemRange(address).readInt8(address); };
-    LowMemoryBase.prototype.readUInt8 = function (address) { return this.getMemRange(address).readUInt8(address); };
-    LowMemoryBase.prototype.readInt16 = function (address) { return this.getMemRange(address).readInt16(address); };
-    LowMemoryBase.prototype.readUInt16 = function (address) { return this.getMemRange(address).readUInt16(address); };
-    LowMemoryBase.prototype.readInt32 = function (address) { return this.getMemRange(address).readInt32(address); };
-    LowMemoryBase.prototype.readUInt32 = function (address) { return this.getMemRange(address).readUInt32(address); };
-    LowMemoryBase.prototype.readFloat32 = function (address) { return this.getMemRange(address).readFloat32(address); };
-    LowMemoryBase.prototype.readUInt32_2 = function (address) { return this.getMemRange(address).readUInt32_2(address); };
-    LowMemoryBase.prototype.slice = function (low, high) {
-        return this.getMemRange(low).slice(low, high);
-    };
-    LowMemoryBase.prototype.availableAfterAddress = function (address) {
-        return this.getMemRange(address).availableAfterAddress(address);
-    };
-    return LowMemoryBase;
-})();
-function isNodeJs() {
-    return typeof process != 'undefined';
-}
-function allowBigAlloc() {
-    try {
-        var ab = new ArrayBuffer(0x0a000000 + 4);
-        return true;
-    }
-    catch (e) {
-        return false;
-    }
-}
-function supportFastMemory() {
-    return !isNodeJs() && allowBigAlloc();
-}
-var FastMemory = (function () {
-    function FastMemory() {
+var Memory = (function () {
+    function Memory() {
         this.invalidateDataRange = new Signal();
         this.invalidateDataAll = new Signal();
         this.writeBreakpoints = [];
-        if (supportFastMemory()) {
-            this.base = new FastMemoryBase();
-        }
-        else {
-            this.base = new LowMemoryBase();
-        }
-        this._updateWriteFunctions();
     }
-    FastMemory.prototype.isAddressInRange = function (address, min, max) {
+    Memory.prototype.writeInt8 = function (address, value) { throw "Must override"; };
+    Memory.prototype.writeInt16 = function (address, value) { throw "Must override"; };
+    Memory.prototype.writeInt32 = function (address, value) { throw "Must override"; };
+    Memory.prototype.writeFloat32 = function (address, value) { throw "Must override"; };
+    Memory.prototype.readInt8 = function (address) { throw "Must override"; };
+    Memory.prototype.readUInt8 = function (address) { throw "Must override"; };
+    Memory.prototype.readInt16 = function (address) { throw "Must override"; };
+    Memory.prototype.readUInt16 = function (address) { throw "Must override"; };
+    Memory.prototype.readInt32 = function (address) { throw "Must override"; };
+    Memory.prototype.readUInt32 = function (address) { throw "Must override"; };
+    Memory.prototype.readFloat32 = function (address) { throw "Must override"; };
+    Memory.prototype.readUInt32_2 = function (address) { throw "Must override"; };
+    Memory.prototype.slice = function (low, high) { throw "Must override"; };
+    Memory.prototype.availableAfterAddress = function (address) { throw "Must override"; };
+    Memory.prototype.isAddressInRange = function (address, min, max) {
         address &= FastMemory.MASK;
         address >>>= 0;
         min &= FastMemory.MASK;
@@ -14772,7 +14667,7 @@ var FastMemory = (function () {
         max >>>= 0;
         return (address >= min) && (address < max);
     };
-    FastMemory.prototype.isValidAddress = function (address) {
+    Memory.prototype.isValidAddress = function (address) {
         address &= FastMemory.MASK;
         if ((address & 0x3E000000) == 0x08000000)
             return true;
@@ -14786,27 +14681,24 @@ var FastMemory = (function () {
             return true;
         return false;
     };
-    FastMemory.prototype.availableAfterAddress = function (address) {
-        return this.base.availableAfterAddress(address);
-    };
-    FastMemory.prototype.getPointerPointer = function (type, address) {
+    Memory.prototype.getPointerPointer = function (type, address) {
         if (address == 0)
             return null;
         return new Pointer(type, this, address);
     };
-    FastMemory.prototype.getPointerDataView = function (address, size) {
+    Memory.prototype.getPointerDataView = function (address, size) {
         var data = this.getPointerU8Array(address, size);
         return new DataView(data.buffer, data.byteOffset, data.byteLength);
     };
-    FastMemory.prototype.getPointerU8Array = function (address, size) {
+    Memory.prototype.getPointerU8Array = function (address, size) {
         if (!size)
             size = this.availableAfterAddress(address);
-        return this.base.slice(address, address + size);
+        return this.slice(address, address + size);
     };
-    FastMemory.prototype.getPointerU16Array = function (address, size) {
+    Memory.prototype.getPointerU16Array = function (address, size) {
         return new Uint16Array(this.getPointerU8Array(address, size));
     };
-    FastMemory.prototype.getPointerStream = function (address, size) {
+    Memory.prototype.getPointerStream = function (address, size) {
         if (address == 0)
             return null;
         if (size === 0)
@@ -14819,7 +14711,7 @@ var FastMemory = (function () {
             return Stream.INVALID;
         return new Stream(this.getPointerDataView(address & FastMemory.MASK, size));
     };
-    FastMemory.prototype.getU8Array = function (address, size) {
+    Memory.prototype.getU8Array = function (address, size) {
         if (address == 0)
             return null;
         if (!this.isValidAddress(address))
@@ -14828,7 +14720,7 @@ var FastMemory = (function () {
             size = this.availableAfterAddress(address & FastMemory.MASK);
         return this.getPointerU8Array(address & FastMemory.MASK, size);
     };
-    FastMemory.prototype.getU16Array = function (address, size) {
+    Memory.prototype.getU16Array = function (address, size) {
         if (address == 0)
             return null;
         if (!this.isValidAddress(address))
@@ -14837,27 +14729,13 @@ var FastMemory = (function () {
             size = this.availableAfterAddress(address & FastMemory.MASK);
         return this.getPointerU16Array(address & FastMemory.MASK, size);
     };
-    FastMemory.prototype._updateWriteFunctions = function () {
-        if (this.writeBreakpoints.length > 0) {
-            this.writeInt8 = this._writeInt8_break;
-            this.writeInt16 = this._writeInt16_break;
-            this.writeInt32 = this._writeInt32_break;
-            this.writeFloat32 = this._writeFloat32_break;
-        }
-        else {
-            this.writeInt8 = this._writeInt8;
-            this.writeInt16 = this._writeInt16;
-            this.writeInt32 = this._writeInt32;
-            this.writeFloat32 = this._writeFloat32;
-        }
-    };
-    FastMemory.prototype.addWatch4 = function (address) {
+    Memory.prototype.addWatch4 = function (address) {
         var _this = this;
         this.addWriteAction(address, function (address) {
             console.log(sprintf('Watch:0x%08X <- 0x%08X', address, _this.readUInt32(address)));
         });
     };
-    FastMemory.prototype.addBreakpointOnValue = function (address, value) {
+    Memory.prototype.addBreakpointOnValue = function (address, value) {
         //Watch: 0x0951044C < - 0x2A000000 
         var _this = this;
         this.addWriteAction(address, function (actualAddress) {
@@ -14868,11 +14746,10 @@ var FastMemory = (function () {
             }
         });
     };
-    FastMemory.prototype.addWriteAction = function (address, action) {
+    Memory.prototype.addWriteAction = function (address, action) {
         this.writeBreakpoints.push({ address: address, action: action });
-        this._updateWriteFunctions();
     };
-    FastMemory.prototype._checkWriteBreakpoints = function (start, end) {
+    Memory.prototype._checkWriteBreakpoints = function (start, end) {
         start &= FastMemory.MASK;
         end &= FastMemory.MASK;
         for (var n = 0; n < this.writeBreakpoints.length; n++) {
@@ -14883,56 +14760,17 @@ var FastMemory = (function () {
             }
         }
     };
-    FastMemory.prototype._writeInt8 = function (address, value) { this.base.writeInt8(address, value); };
-    FastMemory.prototype._writeInt16 = function (address, value) { this.base.writeInt16(address, value); };
-    FastMemory.prototype._writeInt32 = function (address, value) { this.base.writeInt32(address, value); };
-    FastMemory.prototype._writeFloat32 = function (address, value) { this.base.writeFloat32(address, value); };
-    FastMemory.prototype._writeInt8_break = function (address, value) { this._writeInt8(address, value); this._checkWriteBreakpoints(address, address + 1); };
-    FastMemory.prototype._writeInt16_break = function (address, value) { this._writeInt16(address, value); this._checkWriteBreakpoints(address, address + 2); };
-    FastMemory.prototype._writeInt32_break = function (address, value) { this._writeInt32(address, value); this._checkWriteBreakpoints(address, address + 4); };
-    FastMemory.prototype._writeFloat32_break = function (address, value) { this._writeFloat32(address, value); this._checkWriteBreakpoints(address, address + 4); };
-    FastMemory.prototype.writeInt8 = function (address, value) { this._writeInt8(address, value); };
-    FastMemory.prototype.writeInt16 = function (address, value) { this._writeInt16(address, value); };
-    FastMemory.prototype.writeInt32 = function (address, value) { this._writeInt32(address, value); };
-    FastMemory.prototype.writeFloat32 = function (address, value) { this._writeFloat32(address, value); };
-    FastMemory.prototype.readInt8 = function (address) { return this.base.readInt8(address); };
-    FastMemory.prototype.readUInt8 = function (address) { return this.base.readUInt8(address); };
-    FastMemory.prototype.readInt16 = function (address) { return this.base.readInt16(address); };
-    FastMemory.prototype.readUInt16 = function (address) { return this.base.readUInt16(address); };
-    FastMemory.prototype.readInt32 = function (address) { return this.base.readInt32(address); };
-    FastMemory.prototype.readUInt32 = function (address) { return this.base.readUInt32(address); };
-    FastMemory.prototype.readFloat32 = function (address) { return this.base.readFloat32(address); };
-    FastMemory.prototype.readUInt32_2 = function (address) { return this.base.readUInt32_2(address); };
-    FastMemory.prototype.readArrayBuffer = function (address, length) {
+    Memory.prototype.readArrayBuffer = function (address, length) {
         var out = new Uint8Array(length);
         out.set(this.getPointerU8Array(address, length));
         return out.buffer;
     };
-    FastMemory.prototype.sliceWithBounds = function (low, high) {
+    Memory.prototype.sliceWithBounds = function (low, high) {
         return new Stream(this.getPointerDataView(low, high - low));
     };
-    FastMemory.prototype.sliceWithSize = function (address, size) {
+    Memory.prototype.sliceWithSize = function (address, size) {
         return new Stream(this.getPointerDataView(address, size));
     };
-    FastMemory.DEFAULT_FRAME_ADDRESS = 0x04000000;
-    FastMemory.MASK = 0x0FFFFFFF;
-    FastMemory.MAIN_OFFSET = 0x08000000;
-    return FastMemory;
-})();
-var Memory = (function (_super) {
-    __extends(Memory, _super);
-    function Memory() {
-        _super.apply(this, arguments);
-    }
-    Object.defineProperty(Memory, "instance", {
-        get: function () {
-            if (!Memory._instance)
-                Memory._instance = new Memory();
-            return Memory._instance;
-        },
-        enumerable: true,
-        configurable: true
-    });
     Memory.prototype.reset = function () {
         this.memset(FastMemory.DEFAULT_FRAME_ADDRESS, 0, 0x200000);
     };
@@ -14999,8 +14837,7 @@ var Memory = (function (_super) {
     };
     Memory.prototype.writeUint8Array = function (address, data) {
         for (var n = 0; n < data.length; n++)
-            this._writeInt8(address + n, data[n]);
-        this._checkWriteBreakpoints(address, address + data.length);
+            this.writeInt8(address + n, data[n]);
     };
     Memory.memoryCopy = function (source, sourcePosition, destination, destinationPosition, length) {
         var _source = new Uint8Array(source, sourcePosition, length);
@@ -15011,9 +14848,167 @@ var Memory = (function (_super) {
         if (name === void 0) { name = 'memory.bin'; }
         saveAs(new Blob([this.getPointerDataView(0x08000000, 0x2000000)]), name);
     };
+    Memory.DEFAULT_FRAME_ADDRESS = 0x04000000;
+    Memory.MASK = 0x0FFFFFFF;
+    Memory.MAIN_OFFSET = 0x08000000;
     return Memory;
-})(FastMemory);
+})();
 exports.Memory = Memory;
+var FastMemory = (function (_super) {
+    __extends(FastMemory, _super);
+    function FastMemory() {
+        this.buffer = new ArrayBuffer(0x0a000000 + 4);
+        this.s8 = new Int8Array(this.buffer);
+        this.u8 = new Uint8Array(this.buffer);
+        this.u16 = new Uint16Array(this.buffer);
+        this.s16 = new Int16Array(this.buffer);
+        this.s32 = new Int32Array(this.buffer);
+        this.u32 = new Uint32Array(this.buffer);
+        this.f32 = new Float32Array(this.buffer);
+        _super.call(this);
+    }
+    FastMemory.prototype.writeInt8 = function (address, value) { this.u8[(address & FastMemory.MASK) >> 0] = value; };
+    FastMemory.prototype.writeInt16 = function (address, value) { this.u16[(address & FastMemory.MASK) >> 1] = value; };
+    FastMemory.prototype.writeInt32 = function (address, value) { this.u32[(address & FastMemory.MASK) >> 2] = value; };
+    FastMemory.prototype.writeFloat32 = function (address, value) { this.f32[(address & FastMemory.MASK) >> 2] = value; };
+    FastMemory.prototype.readInt8 = function (address) { return this.s8[(address & FastMemory.MASK) >> 0]; };
+    FastMemory.prototype.readUInt8 = function (address) { return this.u8[(address & FastMemory.MASK) >> 0]; };
+    FastMemory.prototype.readInt16 = function (address) { return this.s16[(address & FastMemory.MASK) >> 1]; };
+    FastMemory.prototype.readUInt16 = function (address) { return this.u16[(address & FastMemory.MASK) >> 1]; };
+    FastMemory.prototype.readInt32 = function (address) { return this.s32[(address & FastMemory.MASK) >> 2]; };
+    FastMemory.prototype.readUInt32 = function (address) { return this.u32[(address & FastMemory.MASK) >> 2]; };
+    FastMemory.prototype.readFloat32 = function (address) { return this.f32[(address & FastMemory.MASK) >> 2]; };
+    FastMemory.prototype.readUInt32_2 = function (address) { return this.u32[address]; };
+    FastMemory.prototype.slice = function (low, high) {
+        low &= FastMemory.MASK;
+        high &= FastMemory.MASK;
+        return new Uint8Array(this.buffer, low, high - low);
+    };
+    FastMemory.prototype.availableAfterAddress = function (address) {
+        return this.buffer.byteLength - (address & FastMemory.MASK);
+    };
+    return FastMemory;
+})(Memory);
+var LowMemorySegment = (function () {
+    function LowMemorySegment(name, offset, buffer) {
+        this.name = name;
+        this.offset = offset;
+        this.buffer = buffer;
+        this.size = buffer.byteLength;
+        this.low = offset;
+        this.offset4 = (offset / 4) | 0;
+        this.high = this.low + this.size;
+        this.s8 = new Int8Array(this.buffer);
+        this.u8 = new Uint8Array(this.buffer);
+        this.u16 = new Uint16Array(this.buffer);
+        this.s16 = new Int16Array(this.buffer);
+        this.s32 = new Int32Array(this.buffer);
+        this.u32 = new Uint32Array(this.buffer);
+        this.f32 = new Float32Array(this.buffer);
+    }
+    LowMemorySegment.prototype.contains = function (address) {
+        return address >= this.low && address < this.high;
+    };
+    LowMemorySegment.prototype.writeInt8 = function (address, value) { this.u8[(address & FastMemory.MASK - this.offset) >> 0] = value; };
+    LowMemorySegment.prototype.writeInt16 = function (address, value) { this.u16[(address & FastMemory.MASK - this.offset) >> 1] = value; };
+    LowMemorySegment.prototype.writeInt32 = function (address, value) { this.u32[(address & FastMemory.MASK - this.offset) >> 2] = value; };
+    LowMemorySegment.prototype.writeFloat32 = function (address, value) { this.f32[(address & FastMemory.MASK - this.offset) >> 2] = value; };
+    LowMemorySegment.prototype.readInt8 = function (address) { return this.s8[(address & FastMemory.MASK - this.offset) >> 0]; };
+    LowMemorySegment.prototype.readUInt8 = function (address) { return this.u8[(address & FastMemory.MASK - this.offset) >> 0]; };
+    LowMemorySegment.prototype.readInt16 = function (address) { return this.s16[(address & FastMemory.MASK - this.offset) >> 1]; };
+    LowMemorySegment.prototype.readUInt16 = function (address) { return this.u16[(address & FastMemory.MASK - this.offset) >> 1]; };
+    LowMemorySegment.prototype.readInt32 = function (address) { return this.s32[(address & FastMemory.MASK - this.offset) >> 2]; };
+    LowMemorySegment.prototype.readUInt32 = function (address) { return this.u32[(address & FastMemory.MASK - this.offset) >> 2]; };
+    LowMemorySegment.prototype.readFloat32 = function (address) { return this.f32[(address & FastMemory.MASK - this.offset) >> 2]; };
+    LowMemorySegment.prototype.readUInt32_2 = function (address) { return this.u32[address - this.offset4]; };
+    LowMemorySegment.prototype.slice = function (low, high) {
+        low &= FastMemory.MASK;
+        high &= FastMemory.MASK;
+        low -= this.offset;
+        high -= this.offset;
+        return new Uint8Array(this.buffer, low, high - low);
+    };
+    LowMemorySegment.prototype.availableAfterAddress = function (address) {
+        return this.buffer.byteLength - (address & FastMemory.MASK - this.offset);
+    };
+    return LowMemorySegment;
+})();
+var LowMemory = (function (_super) {
+    __extends(LowMemory, _super);
+    function LowMemory() {
+        this.scratchpad = new LowMemorySegment('scatchpad', 0x00000000, new ArrayBuffer(16 * 1024 + 0x00010000));
+        this.videomem = new LowMemorySegment('videomem', 0x04000000, new ArrayBuffer(2 * 1024 * 1024));
+        this.mainmem = new LowMemorySegment('mainmem', 0x08000000, new ArrayBuffer(32 * 1024 * 1024));
+        _super.call(this);
+    }
+    LowMemory.prototype.getMemRange = function (address) {
+        address &= FastMemory.MASK;
+        if (address >= 0x08000000) {
+            return this.mainmem;
+        }
+        else {
+            if (this.scratchpad.contains(address))
+                return this.scratchpad;
+            if (this.videomem.contains(address))
+                return this.videomem;
+            if (this.mainmem.contains(address))
+                return this.mainmem;
+            printf("Unmapped: %08X", address);
+            return null;
+        }
+    };
+    LowMemory.prototype.writeInt8 = function (address, value) { this.getMemRange(address).writeInt8(address, value); };
+    LowMemory.prototype.writeInt16 = function (address, value) { this.getMemRange(address).writeInt16(address, value); };
+    LowMemory.prototype.writeInt32 = function (address, value) { this.getMemRange(address).writeInt32(address, value); };
+    LowMemory.prototype.writeFloat32 = function (address, value) { this.getMemRange(address).writeFloat32(address, value); };
+    LowMemory.prototype.readInt8 = function (address) { return this.getMemRange(address).readInt8(address); };
+    LowMemory.prototype.readUInt8 = function (address) { return this.getMemRange(address).readUInt8(address); };
+    LowMemory.prototype.readInt16 = function (address) { return this.getMemRange(address).readInt16(address); };
+    LowMemory.prototype.readUInt16 = function (address) { return this.getMemRange(address).readUInt16(address); };
+    LowMemory.prototype.readInt32 = function (address) { return this.getMemRange(address).readInt32(address); };
+    LowMemory.prototype.readUInt32 = function (address) { return this.getMemRange(address).readUInt32(address); };
+    LowMemory.prototype.readFloat32 = function (address) { return this.getMemRange(address).readFloat32(address); };
+    LowMemory.prototype.readUInt32_2 = function (address) { return this.getMemRange(address).readUInt32_2(address); };
+    LowMemory.prototype.slice = function (low, high) {
+        return this.getMemRange(low).slice(low, high);
+    };
+    LowMemory.prototype.availableAfterAddress = function (address) {
+        return this.getMemRange(address).availableAfterAddress(address);
+    };
+    return LowMemory;
+})(Memory);
+function isNodeJs() {
+    return typeof process != 'undefined';
+}
+function allowBigAlloc() {
+    try {
+        var ab = new ArrayBuffer(0x0a000000 + 4);
+        return true;
+    }
+    catch (e) {
+        return false;
+    }
+}
+function supportFastMemory() {
+    return !isNodeJs() && allowBigAlloc();
+}
+function create() {
+    if (supportFastMemory()) {
+        console.log(FastMemory);
+        return new FastMemory();
+    }
+    else {
+        return new LowMemory();
+    }
+}
+exports.create = create;
+var _instance = null;
+function getInstance() {
+    if (_instance == null)
+        _instance = create();
+    return _instance;
+}
+exports.getInstance = getInstance;
 
 },
 "src/core/pixelformat": function(module, exports, require) {
@@ -15287,7 +15282,6 @@ var MemoryVfs = _vfs.MemoryVfs;
 var ProxyVfs = _vfs.ProxyVfs;
 var Config = _config.Config;
 var PspElfLoader = _elf_psp.PspElfLoader;
-var Memory = _memory.Memory;
 var EmulatorContext = _context.EmulatorContext;
 var InterruptManager = _interrupt.InterruptManager;
 var PspAudio = _audio.PspAudio;
@@ -15307,7 +15301,7 @@ var Emulator = (function () {
     function Emulator(memory) {
         this.gameTitle = '';
         if (!memory)
-            memory = Memory.instance;
+            memory = _memory.getInstance();
         this.memory = memory;
     }
     Emulator.prototype.stopAsync = function () {
@@ -26293,7 +26287,7 @@ describe('elf', function () {
         });
     });
     it('load', function () {
-        var memory = _memory.Memory.instance;
+        var memory = _memory.getInstance();
         var memoryManager = new _manager.MemoryManager();
         var display = new DummyPspDisplay();
         var syscallManager = new SyscallManager(context);
@@ -26683,11 +26677,10 @@ function ref() { }
 exports.ref = ref;
 var _cpu = require('../src/core/cpu');
 var _memory = require('../src/core/memory');
-var Memory = _memory.Memory;
 var CpuState = _cpu.CpuState;
 var assembler = new _cpu.MipsAssembler();
 var disassembler = new _cpu.MipsDisassembler();
-var memory = Memory.instance;
+var memory = _memory.getInstance();
 var TestSyscallManager = (function (_super) {
     __extends(TestSyscallManager, _super);
     function TestSyscallManager() {
