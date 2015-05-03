@@ -19,7 +19,7 @@
     var emu = new Emulator();
 	var output = document.getElementById('output');
 
-    UrlAsyncStream.fromUrlAsync('data/benchmark/benchmark.prx').then(function(stream) {
+    UrlAsyncStream.fromUrlAsync('benchmark.prx').then(function(stream) {
 	    return emu.loadExecuteAndWaitAsync(stream, 'benchmark.prx', function() {
 	        emu.context.onStdout.add(function(data) {
 	        	output.textContent = output.textContent + data;
